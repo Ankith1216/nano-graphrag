@@ -2,7 +2,13 @@ import pytest
 import dspy
 from openai import BadRequestError
 from unittest.mock import Mock, patch, AsyncMock
+import sys
+from types import SimpleNamespace
+
+sys.modules.setdefault("transformers", SimpleNamespace(AutoTokenizer=Mock()))
 from nano_graphrag.entity_extraction.extract import generate_dataset, extract_entities_dspy
+from nano_graphrag._op import extract_entities
+from nano_graphrag.prompt import PROMPTS
 from nano_graphrag.base import TextChunkSchema, BaseGraphStorage, BaseVectorStorage
 import httpx
 
@@ -132,6 +138,50 @@ async def test_generate_dataset_with_bad_request_error():
     assert len(result) == 0
     mock_to_thread.assert_called_once()
 
+
+@pytest.mark.asyncio
+async def test_extract_entities_stops_after_completion_delimiter():
+    chunks = {
+        "chunk1": TextChunkSchema(content="Some content for extraction"),
+    }
+    mock_graph_storage = Mock(spec=BaseGraphStorage)
+    tokenizer_wrapper = Mock()
+    completion_delimiter = PROMPTS["DEFAULT_COMPLETION_DELIMITER"]
+    tuple_delimiter = PROMPTS["DEFAULT_TUPLE_DELIMITER"]
+    final_response = (
+        f"(\"entity\"{tuple_delimiter}\"Apple\"{tuple_delimiter}"
+        f"\"ORGANIZATION\"{tuple_delimiter}\"A tech company\"){completion_delimiter}"
+    )
+
+    llm_mock = AsyncMock(return_value=final_response)
+    global_config = {
+        "best_model_func": llm_mock,
+        "entity_extract_max_gleaning": 2,
+    }
+
+    with patch(
+        "nano_graphrag._op._merge_nodes_then_upsert", new_callable=AsyncMock
+    ) as mock_merge_nodes, patch(
+        "nano_graphrag._op._merge_edges_then_upsert", new_callable=AsyncMock
+    ) as mock_merge_edges:
+        mock_merge_nodes.return_value = {
+            "entity_name": "APPLE",
+            "description": "A tech company",
+        }
+
+        result = await extract_entities(
+            chunks,
+            mock_graph_storage,
+            entity_vdb=None,
+            tokenizer_wrapper=tokenizer_wrapper,
+            global_config=global_config,
+        )
+
+    assert result == mock_graph_storage
+    assert llm_mock.await_count == 1
+    assert all("history_messages" not in call.kwargs for call in llm_mock.await_args_list)
+    mock_merge_nodes.assert_awaited_once()
+    assert mock_merge_edges.await_count == 0
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_compiled,entity_vdb", [
