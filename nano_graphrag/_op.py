@@ -311,26 +311,38 @@ async def extract_entities(
         chunk_key = chunk_key_dp[0]
         chunk_dp = chunk_key_dp[1]
         content = chunk_dp["content"]
+        completion_delimiter = context_base["completion_delimiter"]
         hint_prompt = entity_extract_prompt.format(**context_base, input_text=content)
         final_result = await use_llm_func(hint_prompt)
         if isinstance(final_result, list):
             final_result = final_result[0]["text"]
 
-        history = pack_user_ass_to_openai_messages(hint_prompt, final_result, using_amazon_bedrock)
-        for now_glean_index in range(entity_extract_max_gleaning):
-            glean_result = await use_llm_func(continue_prompt, history_messages=history)
-
-            history += pack_user_ass_to_openai_messages(continue_prompt, glean_result, using_amazon_bedrock)
-            final_result += glean_result
-            if now_glean_index == entity_extract_max_gleaning - 1:
-                break
-
-            if_loop_result: str = await use_llm_func(
-                if_loop_prompt, history_messages=history
+        if completion_delimiter not in final_result:
+            history = pack_user_ass_to_openai_messages(
+                hint_prompt, final_result, using_amazon_bedrock
             )
-            if_loop_result = if_loop_result.strip().strip('"').strip("'").lower()
-            if if_loop_result != "yes":
-                break
+            for now_glean_index in range(entity_extract_max_gleaning):
+                glean_result = await use_llm_func(
+                    continue_prompt, history_messages=history
+                )
+
+                history += pack_user_ass_to_openai_messages(
+                    continue_prompt, glean_result, using_amazon_bedrock
+                )
+                final_result += glean_result
+
+                if completion_delimiter in final_result:
+                    break
+
+                if now_glean_index == entity_extract_max_gleaning - 1:
+                    break
+
+                if_loop_result: str = await use_llm_func(
+                    if_loop_prompt, history_messages=history
+                )
+                if_loop_result = if_loop_result.strip().strip('\"').strip("'").lower()
+                if if_loop_result != "yes":
+                    break
 
         records = split_string_by_multi_markers(
             final_result,
